@@ -48,6 +48,12 @@ lineage and change record.
 Everything persists under `<board>/` inside the target repo: any session — or a human — can
 resume, audit, or continue the engagement later. The workflow never commits.
 
+## Install (Devin)
+
+The repository also ships a native Devin plugin, skill and Python workflow. See
+[DEVIN.md](DEVIN.md) for organization-wide installation, configuration, approval
+gates, preserved laws and explicit differences from the ZCode engine.
+
 ## Install (ZCode)
 
 Two pieces, both optional to the other but best together:
