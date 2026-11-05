@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("mastermind_workflow", ROOT / "skills/mastermind/workflow.py")
@@ -71,8 +72,9 @@ class WorkflowTests(unittest.TestCase):
                 if self.interrupt:
                     self.interrupt = False
                     raise RuntimeError("Synthetic controller interruption")
-                self.assertTrue((self.board / "rounds/C-001/r1-return.md").exists())
-                self.assertTrue((self.board / "rounds/C-001/r1-jury-brief.md").exists())
+                number = kwargs["label"].split("-r")[1].split("-")[0]
+                self.assertTrue((self.board / f"rounds/C-001/r{number}-return.md").exists())
+                self.assertTrue((self.board / f"rounds/C-001/r{number}-jury-brief.md").exists())
                 self.assertNotIn("correction_target", prompt)
                 fail = self.fail_jury if phase == "jury" else self.fail_panel
                 return {"verdict": "FAIL" if fail else "PASS", "score": 4 if fail else 9,
@@ -205,6 +207,123 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unrelated"):
             self.run_workflow()
         self.assertEqual((self.board / "PLAYBOOK.md").read_text(), "user-owned content")
+
+    def test_empty_or_missing_suite_is_rejected_before_planning(self):
+        for bad in (None, "", "   "):
+            workflow.CONFIG["suite"] = bad
+            with self.assertRaisesRegex(ValueError, "suite command is required"):
+                self.run_workflow()
+        self.assertEqual(self.calls, [])
+
+    def test_missing_gate_suite_never_becomes_ready(self):
+        self.approve()
+        (self.board / "PLAYBOOK.md").write_text("Suite command: ``\n")
+        self.run_workflow()
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# BLOCKED"))
+        self.assertNotIn("jury", [p for p, _ in self.calls])
+
+    def test_rejected_bundle_resume_dispatches_a_fresh_attempt(self):
+        self.return_path = "stray.py"
+        self.approve()
+        self.run_workflow()
+        self.return_path = "app.py"
+        workflow.CONFIG["mode"] = "resume"
+        self.run_workflow()
+        self.assertEqual(len([p for p, _ in self.calls if p == "implement"]), 2)
+        self.assertTrue((self.board / "rounds/C-001/r1-return.json").exists())
+        self.assertTrue((self.board / "rounds/C-001/r2-return.json").exists())
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# READY"))
+
+    def test_unrelated_tracked_symlink_does_not_block_execution(self):
+        (self.repo / "linked").symlink_to("app.py")
+        self.git("add", "linked")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "link")
+        workflow.CONFIG["commit"] = self.git("rev-parse", "HEAD").strip()
+        self.approve()
+        self.run_workflow()
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# READY"))
+        self.assertTrue((self.repo / "linked").is_symlink())
+
+    def test_inventory_includes_ignored_files_modes_and_link_identity(self):
+        (self.repo / ".gitignore").write_text("ignored/\n")
+        ignored = self.repo / "ignored"
+        ignored.mkdir()
+        (ignored / "cache").write_text("before")
+        (ignored / "link").symlink_to("missing")
+        before = workflow.inventory(self.repo, "mastermind")
+        (ignored / "cache").write_text("after")
+        (self.repo / "app.py").chmod(0o755)
+        after = workflow.inventory(self.repo, "mastermind")
+        self.assertNotEqual(before["ignored/cache"], after["ignored/cache"])
+        self.assertNotEqual(before["app.py"], after["app.py"])
+        self.assertEqual(before["ignored/link"], after["ignored/link"])
+
+    def test_ignored_out_of_scope_suite_side_effect_blocks(self):
+        (self.repo / ".gitignore").write_text("cache.txt\n")
+        self.git("add", ".gitignore")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "ignore")
+        workflow.CONFIG["commit"] = self.git("rev-parse", "HEAD").strip()
+        (self.repo / "cache.txt").write_text("before")
+        workflow.CONFIG["suite"] = ('python3 -c "from pathlib import Path; '
+                                    'p = Path(\'app.py\'); '
+                                    'Path(\'cache.txt\').write_text(p.read_text()); '
+                                    'assert p.read_text() == \'new\\n\'"')
+        self.approve()
+        self.run_workflow()
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# BLOCKED"))
+        self.assertIn("cache.txt", (self.board / "rounds/C-001/r1-gate.md").read_text())
+        self.assertNotIn("jury", [p for p, _ in self.calls])
+
+    def test_ambiguous_application_never_recreates_user_deleted_file(self):
+        original_agent = workflow.agent
+
+        async def with_new_file(prompt, **kwargs):
+            reply = await original_agent(prompt, **kwargs)
+            if kwargs["phase"] == "plan":
+                reply["cards"][0]["scope"].append("added.py")
+            if kwargs["phase"] == "implement":
+                reply["files"].append({"path": "added.py", "content": "new file\n"})
+            return reply
+
+        workflow.agent = with_new_file
+        self.approve()
+        apply = workflow.apply_bundle
+
+        def interrupted(*args):
+            apply(*args)
+            raise RuntimeError("interrupted before applied checkpoint")
+
+        with patch.object(workflow, "apply_bundle", interrupted):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                self.run_workflow()
+        (self.repo / "added.py").unlink()
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            self.run_workflow()
+        self.assertFalse((self.repo / "added.py").exists())
+
+    def test_deletion_after_applied_checkpoint_blocks_resume(self):
+        self.approve()
+        self.interrupt = True
+        with self.assertRaisesRegex(RuntimeError, "interruption"):
+            self.run_workflow()
+        (self.repo / "app.py").unlink()
+        with self.assertRaisesRegex(ValueError, "Tree changed"):
+            self.run_workflow()
+        self.assertFalse((self.repo / "app.py").exists())
+
+    def test_closing_untested_coverage_prevents_ready(self):
+        original = workflow.agent
+
+        async def unchecked(prompt, **kwargs):
+            reply = await original(prompt, **kwargs)
+            if kwargs["phase"] == "close":
+                reply["not_checked"] = ["UI environment unavailable"]
+            return reply
+
+        workflow.agent = unchecked
+        self.approve()
+        self.run_workflow()
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# REPAIR"))
 
 
 if __name__ == "__main__":

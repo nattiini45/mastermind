@@ -97,3 +97,18 @@ For development checks, install `requirements-dev.txt` in an isolated venv, then
 run `ruff check skills/mastermind/workflow.py tests/test_devin_workflow.py` and
 `mypy --check-untyped-defs skills/mastermind/workflow.py`. The runtime names are
 annotated without assigning or replacing Devin's injected functions.
+
+The controller requires a nonempty suite; an absent suite or closing `not_checked`
+items cannot produce READY. Scope inventory includes ignored files and file modes,
+but never shares ignored contents with agents. Unrelated symlinks are inventoried
+without following targets; editing symlinks remains unsupported. Inventory hashes
+the full worktree (excluding Git metadata and the board), so large ignored build
+or dependency trees increase controller I/O; there is no silent scope exclusion.
+
+Bundle application has explicit `applying`/`applied` checkpoints. Interruption during
+`applying` fails closed and requires user reconciliation in a fresh engagement;
+the controller never guesses whether a missing file was unapplied or user-deleted.
+After `applied`, unchanged work can resume without rewriting product files.
+Rejected returns stay in their original round's audit artifacts; subsequent native
+resume uses a new round/agent label, subject to the original round cap. Out-of-scope
+suite side effects block the card immediately rather than being retried silently.

@@ -9,7 +9,9 @@ import fcntl
 import hashlib
 import io
 import json
+import os
 import re
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -101,13 +103,28 @@ def event(board, text):
 
 
 def inventory(root, board):
-    paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").decode().split("\0")
-    result = {}
-    for name in sorted(set(paths) - {""}):
-        if name == board or name.startswith(board + "/"):
-            continue
-        path = safe_path(root, name)
-        result[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    result: dict[str, Any] = {}
+
+    def fail(error):
+        raise error
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=fail):
+        parent = Path(directory)
+        dirs[:] = sorted(d for d in dirs if d != ".git" and str((parent / d).relative_to(root)) != board)
+        for name in sorted(files + [d for d in dirs if (parent / d).is_symlink()]):
+            if name == ".git":
+                continue
+            path = parent / name
+            relative = str(path.relative_to(root))
+            if relative == board:
+                continue
+            if path.is_symlink():
+                result[relative] = {"link": hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()}
+            elif path.is_file():
+                result[relative] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                    "mode": stat.S_IMODE(path.stat().st_mode)}
+            else:
+                raise ValueError(f"Unsupported special file in inventory: {relative}")
     return result
 
 
@@ -131,7 +148,7 @@ def suite_command(board):
 
 
 def run_suite(root, command):
-    if not command:
+    if not command.strip():
         return {"exit_code": None, "output": "No suite configured; tests NOT checked"}
     try:
         process = subprocess.run(command, shell=True, cwd=root, capture_output=True, timeout=1500)
@@ -194,7 +211,7 @@ def valid_verdict(reply):
             and isinstance(reply.get("evidence_checked"), list) and bool(reply["evidence_checked"]))
 
 
-def apply_bundle(root, board, card, bundle, before):
+def validate_bundle(root, card, bundle, before):
     validate_fields(bundle, files=list, evidence=list, deferred=str, blockers=str, spawned=list)
     if len(stable(bundle).encode()) > MAX_BUNDLE_BYTES:
         raise ValueError("Return bundle exceeds 2 MB")
@@ -207,9 +224,9 @@ def apply_bundle(root, board, card, bundle, before):
         path = safe_path(root, item["path"])
         if "\0" in item["content"] or (path.is_file() and "\0" in path.read_text(encoding="utf-8")):
             raise ValueError("Binary file edits are unsupported")
-        current = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-        after = hashlib.sha256(item["content"].encode()).hexdigest()
-        if current not in (before.get(item["path"]), after):
+        current = ({"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "mode": stat.S_IMODE(path.stat().st_mode)} if path.is_file() else None)
+        if current != before.get(item["path"]):
             raise ValueError("User/external edit detected; refusing to overwrite")
     evidence_names = set()
     for item in bundle["evidence"]:
@@ -220,6 +237,10 @@ def apply_bundle(root, board, card, bundle, before):
         evidence_names.add(item["name"])
     if not bundle["evidence"]:
         raise ValueError("Evidence required")
+
+
+def apply_bundle(root, board, card, bundle, before):
+    validate_bundle(root, card, bundle, before)
     # Validate the whole bundle before touching any product file.
     for item in bundle["files"]:
         path = safe_path(root, item["path"])
@@ -268,6 +289,8 @@ async def main():
     tier = CONFIG.get("tier", "standard")
     if mode not in ("plan", "execute", "resume") or tier not in ("light", "standard", "full"):
         raise ValueError("Unsupported mode/tier")
+    if not isinstance(CONFIG.get("suite"), str) or not CONFIG["suite"].strip():
+        raise ValueError("A nonempty controller suite command is required")
     if git(root, "rev-parse", "HEAD").decode().strip() != commit:
         raise ValueError("Target HEAD changed; reconcile with the user, do not checkout/reset")
     if not 1 <= CONFIG.get("max_rounds", 3) <= 6:
@@ -345,18 +368,10 @@ async def main():
                 or contract["open_questions"] or plan["open_questions"]):
             raise ValueError("Missing/stale approval or unresolved questions; re-plan with user answers")
         state = read(state_path) if state_path.exists() else {"cards": {}, "coverage": {}, "jury_calls": 0, "spawned": []}
+        if state.get("pending", {}).get("application") == "applying":
+            raise ValueError("Interrupted bundle application is ambiguous; reconcile with the user before resume")
         if state.get("inventory") is not None and inventory(root, board_name) != state["inventory"]:
-            pending = state.get("pending")
-            if not pending or not (board / pending["return_file"]).exists():
-                raise ValueError("Tree changed since the last checkpoint; reconcile external edits before resume")
-            bundle = read(board / pending["return_file"])
-            expected = dict(pending["before"])
-            for item in bundle["files"]:
-                expected[item["path"]] = hashlib.sha256(item["content"].encode()).hexdigest()
-            live = inventory(root, board_name)
-            if any(live.get(p) not in (pending["before"].get(p), expected.get(p))
-                   for p in live.keys() | expected.keys()):
-                raise ValueError("External edit during interrupted bundle application; reconcile before resume")
+            raise ValueError("Tree changed since the last checkpoint; reconcile external edits before resume")
         if state.get("inventory") is None and workspace(root, board_name, commit) != {"patch": "", "new_files": {}}:
             raise ValueError("Tree changed after planning; re-plan rather than overwrite")
         rounds = CONFIG.get("max_rounds", 3)
@@ -426,7 +441,13 @@ async def main():
                               "SKILLS_READ": [], "DEFERRED": bundle["deferred"], "BLOCKERS": bundle["blockers"],
                               "PLAYBOOK_ADDITIONS": [], "SPAWN": bundle["spawned"]}
                     write(round_dir / f"{prefix}-return.md", "\n".join(k + ":\n" + stable(v) for k, v in labels.items()))
-                    apply_bundle(root, board, card, bundle, before)
+                    if pending.get("application") != "applied":
+                        validate_bundle(root, card, bundle, before)
+                        pending["application"] = "applying"
+                        checkpoint()
+                        apply_bundle(root, board, card, bundle, before)
+                        pending["application"] = "applied"
+                        checkpoint()
                     for evidence in bundle["evidence"]:
                         write(round_dir / f'{prefix}-evidence-{evidence["name"]}', evidence["content"])
                     after = inventory(root, board_name)
@@ -434,11 +455,13 @@ async def main():
                     check = run_suite(root, suite_command(board))
                     violations = []
                     after_gate = inventory(root, board_name)
-                    if any(p not in card["scope"] for p in before.keys() | after_gate.keys() if before.get(p) != after_gate.get(p)):
-                        violations.append("Out-of-scope changes (including suite side effects)")
-                    if check["exit_code"] not in (0, None):
+                    outside = sorted(p for p in before.keys() | after_gate.keys()
+                                     if before.get(p) != after_gate.get(p) and p not in card["scope"])
+                    if outside:
+                        violations.append("Out-of-scope changes (including suite side effects): " + stable(outside))
+                    if check["exit_code"] != 0:
                         baseline = read(board / "suite-baseline.json")
-                        if check == baseline and baseline["exit_code"] not in (0, None):
+                        if check["exit_code"] is not None and check == baseline and baseline["exit_code"] not in (0, None):
                             # Named baseline attribution holds; it never silently passes the gate or burns a round.
                             current.update(status="blocked", gap="Held baseline failure: " + str(board / "suite-baseline.json"))
                             state.pop("pending", None)
@@ -458,6 +481,11 @@ async def main():
                     current["status"] = "in-flight"
                     state["cards"][cid] = current
                     checkpoint()  # Product and return are durable before judgment dispatch.
+                    if outside:
+                        current["status"] = "blocked"
+                        state.pop("pending", None)
+                        checkpoint()
+                        break
                     if violations:
                         event(board, f"{cid} stage=gate FAIL {prefix}")
                         state.pop("pending", None)
@@ -538,7 +566,10 @@ async def main():
                         break
                     checkpoint()
                 except (WorkflowAgentError, ValueError) as error:
+                    if state.get("pending", {}).get("application") == "applying":
+                        raise ValueError("Interrupted bundle application; reconcile with the user before resume") from error
                     current.update(status="blocked", gap=f"Seat/bundle failure; no automatic overwrite: {error}")
+                    current["round"] = number
                     state.pop("pending", None)
                     state["cards"][cid] = current
                     checkpoint()
@@ -556,7 +587,7 @@ async def main():
         closer = await seat("close", "inventory", "Read-only closing check. Inventory any missing acceptance "
                             "evidence; do not infer a pass or shrink coverage.\n" + stable({"contract": contract, "plan": plan,
                             "state": state, "missing_units": missing}), {"issues": "array", "checked": "array", "not_checked": "array"})
-        conclusion = "BLOCKED" if opened else "REPAIR" if missing or closer["issues"] or state["spawned"] else "READY"
+        conclusion = "BLOCKED" if opened else "REPAIR" if missing or closer["issues"] or closer["not_checked"] or state["spawned"] else "READY"
         residuals = "# Mastermind RESIDUALS\n| Card | Criterion / finding | Disposition |\n|---|---|---|\n"
         residuals += "\n".join(f'| {c} | {state["cards"][c]["gap"]} | OPEN (owner: user) |' for c in opened)
         residuals += "\n" + "\n".join(f"| n/a | {u} | OPEN missing coverage (owner: user) |" for u in missing)
