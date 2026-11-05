@@ -31,6 +31,10 @@ Use the native Python template beside this skill, not `mastermind.dwf.ts`.
 5. Wait for completion notifications, not polling. `run_id` resumes runtime
    calls; the durable board permits a new session to reconcile a stopped run.
    The controller is the only board writer. Never edit a live board manually.
+   A legacy inventory migration stops separately: show `INVENTORY-MIGRATION.json`
+   and explain its previously unobserved files/modes and fresh-round disposition.
+   Obtain explicit user approval before setting `approved_inventory_migration_sha256`;
+   plan approval alone does not authorize adopting the new worktree baseline.
 6. Deliver `REPORT.md` with READY / REPAIR / BLOCKED (PLANNED at the gate),
    changed paths, missing coverage unit IDs, residuals, checks and limitations.
    Proposals in SPAWN are held for verification and user approval, never silently

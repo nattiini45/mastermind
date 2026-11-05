@@ -325,6 +325,74 @@ class WorkflowTests(unittest.TestCase):
         self.run_workflow()
         self.assertTrue((self.board / "REPORT.md").read_text().startswith("# REPAIR"))
 
+    def legacy_checkpoint(self):
+        state = workflow.read(self.board / "state.json")
+        state.pop("checkpoint_version", None)
+        state["inventory"] = {p: v["sha256"] for p, v in state["inventory"].items()}
+        if state.get("pending"):
+            state["pending"].pop("application", None)
+            state["pending"]["before"] = {p: v["sha256"] for p, v in state["pending"]["before"].items()}
+        workflow.write(self.board / "state.json", state)
+        return state
+
+    def test_legacy_inventory_upgrade_requires_separate_digest_approval(self):
+        self.approve()
+        self.run_workflow()
+        legacy = self.legacy_checkpoint()
+        before = len(self.calls)
+        self.run_workflow()
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(workflow.read(self.board / "state.json"), legacy)
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# BLOCKED"))
+        proposal = workflow.read(self.board / "INVENTORY-MIGRATION.json")
+        workflow.CONFIG["approved_inventory_migration_sha256"] = proposal["approval_sha256"]
+        self.run_workflow()
+        self.assertEqual(workflow.read(self.board / "state.json")["checkpoint_version"], 2)
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# READY"))
+
+    def test_changed_legacy_checkpoint_is_not_migrated(self):
+        self.approve()
+        self.run_workflow()
+        self.legacy_checkpoint()
+        (self.repo / "app.py").write_text("user change\n")
+        with self.assertRaisesRegex(ValueError, "Tree changed since the legacy checkpoint"):
+            self.run_workflow()
+        self.assertEqual((self.repo / "app.py").read_text(), "user change\n")
+
+    def test_legacy_pending_return_is_archived_and_never_replayed(self):
+        self.approve()
+        self.interrupt = True
+        with self.assertRaisesRegex(RuntimeError, "interruption"):
+            self.run_workflow()
+        self.legacy_checkpoint()
+        self.run_workflow()
+        proposal = workflow.read(self.board / "INVENTORY-MIGRATION.json")
+        workflow.CONFIG["approved_inventory_migration_sha256"] = proposal["approval_sha256"]
+        self.run_workflow()
+        audit = workflow.read(self.board / "legacy-pending-audit.json")
+        self.assertIsInstance(audit["before"]["app.py"], dict)
+        self.assertEqual(len([p for p, _ in self.calls if p == "implement"]), 2)
+        self.assertTrue((self.board / "rounds/C-001/r2-return.json").exists())
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# READY"))
+
+    def test_legacy_migration_approval_binds_newly_observed_ignored_files(self):
+        (self.repo / ".gitignore").write_text("cache.txt\n")
+        self.git("add", ".gitignore")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "ignore")
+        workflow.CONFIG["commit"] = self.git("rev-parse", "HEAD").strip()
+        self.approve()
+        self.run_workflow()
+        self.legacy_checkpoint()
+        (self.repo / "cache.txt").write_text("observed after legacy checkpoint")
+        self.run_workflow()
+        proposal = workflow.read(self.board / "INVENTORY-MIGRATION.json")
+        self.assertEqual(proposal["newly_observed_paths"], ["cache.txt"])
+        workflow.CONFIG["approved_inventory_migration_sha256"] = proposal["approval_sha256"]
+        (self.repo / "cache.txt").write_text("user edited again")
+        self.run_workflow()
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# BLOCKED"))
+        self.assertNotIn("checkpoint_version", workflow.read(self.board / "state.json"))
+
 
 if __name__ == "__main__":
     unittest.main()

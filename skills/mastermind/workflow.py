@@ -128,6 +128,60 @@ def inventory(root, board):
     return result
 
 
+def migrate_inventory(root, board_name, board, state):
+    if state.get("checkpoint_version") == 2:
+        return True
+    if state.get("checkpoint_version") not in (None, 1):
+        raise ValueError("Unsupported checkpoint version; do not downgrade this board")
+    recorded = state["inventory"]
+    live = inventory(root, board_name)
+    legacy = all(isinstance(v, str) for v in recorded.values())
+    if legacy:
+        paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").decode().split("\0")
+        visible = {p for p in paths if p and p != board_name and not p.startswith(board_name + "/")}
+        if visible != set(recorded) or any(live.get(p, {}).get("sha256") != h for p, h in recorded.items()):
+            raise ValueError("Tree changed since the legacy checkpoint; reconcile before migration")
+    elif recorded != live:
+        raise ValueError("Tree changed since the legacy checkpoint; reconcile before migration")
+    pending = state.get("pending")
+    upgraded_before = None
+    if pending:
+        upgraded_before = dict(live)
+        for path, value in pending["before"].items():
+            if legacy:
+                if "mode" not in live.get(path, {}) or not isinstance(value, str):
+                    raise ValueError("Legacy pending snapshot needs manual reconciliation")
+                upgraded_before[path] = {"sha256": value, "mode": live[path]["mode"]}
+            else:
+                upgraded_before[path] = value
+        # Files absent from the old before-snapshot were not yet created.
+        for path in set(recorded) - set(pending["before"]):
+            upgraded_before.pop(path, None)
+    approval = digest({"checkpoint": state, "new_inventory": live, "target_version": 2})
+    proposal = {"approval_sha256": approval, "target_version": 2,
+                "newly_observed_paths": sorted(set(live) - set(recorded)),
+                "mode_baselines": {p: v["mode"] for p, v in live.items() if "mode" in v},
+                "limitations": "Historical ignored files/modes were not recorded. Accept the live baseline explicitly.",
+                "pending_disposition": "Archive and retry in a fresh round; never replay an old pending bundle"}
+    write(board / "INVENTORY-MIGRATION.json", proposal)
+    if CONFIG.get("approved_inventory_migration_sha256") != approval:
+        message = "Legacy inventory migration awaits explicit user approval: " + approval
+        write(board / "HANDOFF.md", "# BLOCKED\n" + message)
+        write(board / "REPORT.md", "# BLOCKED\n" + message)
+        log(message)
+        return False
+    if pending:
+        write(board / "legacy-pending-audit.json", {**pending, "before": upgraded_before})
+        current = state["cards"].setdefault(pending["card"], {"round": 0})
+        current.update(round=max(current["round"], pending["round"]), status="blocked",
+                       gap="Legacy pending return archived; retry from the approved current baseline")
+        state.pop("pending")
+    state.update(checkpoint_version=2, inventory=live)
+    write(board / "state.json", state)
+    event(board, "user-approved inventory migration to v2; historical modes/ignored files not inferred")
+    return True
+
+
 def workspace(root, board, commit):
     delta = git(root, "diff", "--binary", "--no-ext-diff", commit, "--", ".", f":(exclude){board}/").decode()
     untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z").decode().split("\0")
@@ -367,7 +421,9 @@ async def main():
         if (CONFIG.get("approved_plan_sha256") != approval or read(board / "approval.json")["digest"] != approval
                 or contract["open_questions"] or plan["open_questions"]):
             raise ValueError("Missing/stale approval or unresolved questions; re-plan with user answers")
-        state = read(state_path) if state_path.exists() else {"cards": {}, "coverage": {}, "jury_calls": 0, "spawned": []}
+        state = read(state_path) if state_path.exists() else {"checkpoint_version": 2, "cards": {}, "coverage": {}, "jury_calls": 0, "spawned": []}
+        if state.get("inventory") is not None and not migrate_inventory(root, board_name, board, state):
+            return
         if state.get("pending", {}).get("application") == "applying":
             raise ValueError("Interrupted bundle application is ambiguous; reconcile with the user before resume")
         if state.get("inventory") is not None and inventory(root, board_name) != state["inventory"]:
