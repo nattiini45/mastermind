@@ -359,6 +359,32 @@ class WorkflowTests(unittest.TestCase):
             self.run_workflow()
         self.assertEqual((self.repo / "app.py").read_text(), "user change\n")
 
+    def test_versionless_typed_symlinks_migrate_and_pending_return_is_archived(self):
+        (self.repo / "linked").symlink_to("app.py")
+        self.git("add", "linked")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "link")
+        workflow.CONFIG["commit"] = self.git("rev-parse", "HEAD").strip()
+        self.approve()
+        self.interrupt = True
+        with self.assertRaisesRegex(RuntimeError, "interruption"):
+            self.run_workflow()
+        state = workflow.read(self.board / "state.json")
+        state.pop("checkpoint_version")
+        workflow.write(self.board / "state.json", state)
+        link = state["inventory"]["linked"]
+        self.run_workflow()
+        self.assertEqual(workflow.read(self.board / "state.json"), state)
+        proposal = workflow.read(self.board / "INVENTORY-MIGRATION.json")
+        workflow.CONFIG["approved_inventory_migration_sha256"] = proposal["approval_sha256"]
+        self.run_workflow()
+        upgraded = workflow.read(self.board / "state.json")
+        archived = workflow.read(self.board / "legacy-pending-audit.json")
+        self.assertEqual(upgraded["checkpoint_version"], 2)
+        self.assertEqual(upgraded["inventory"]["linked"], link)
+        self.assertEqual(archived["before"]["linked"], link)
+        self.assertEqual(len([p for p, _ in self.calls if p == "implement"]), 2)
+        self.assertTrue((self.board / "REPORT.md").read_text().startswith("# READY"))
+
     def test_legacy_pending_return_is_archived_and_never_replayed(self):
         self.approve()
         self.interrupt = True
