@@ -178,7 +178,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue((self.board / "REPORT.md").read_text().startswith("# BLOCKED"))
 
     def test_paths_lock_and_verdict_contracts(self):
-        for bad in ("../escape", "/absolute", ".git/config", "a\\b", "a\nb"):
+        for bad in (".", "./app.py", "a//b", "../escape", "/absolute", ".git/config", "a\\b", "a\nb"):
             with self.assertRaises(ValueError):
                 workflow.safe_path(self.repo, bad)
         with workflow.board_lock(self.board):
@@ -198,6 +198,13 @@ class WorkflowTests(unittest.TestCase):
         (self.repo / "app.py").write_text("user work")
         with self.assertRaisesRegex(ValueError, "clean tree"):
             self.run_workflow()
+
+    def test_refuses_to_initialize_over_existing_unrelated_directory(self):
+        self.board.mkdir()
+        (self.board / "PLAYBOOK.md").write_text("user-owned content")
+        with self.assertRaisesRegex(ValueError, "unrelated"):
+            self.run_workflow()
+        self.assertEqual((self.board / "PLAYBOOK.md").read_text(), "user-owned content")
 
 
 if __name__ == "__main__":

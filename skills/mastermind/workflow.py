@@ -54,7 +54,8 @@ def safe_path(root, relative):
     if not isinstance(relative, str) or not relative or "\\" in relative or "\n" in relative:
         raise ValueError("Expected a nonempty repository-relative POSIX path")
     parts = PurePosixPath(relative).parts
-    if relative.startswith("/") or any(p in ("..", ".git") for p in parts):
+    if (not parts or str(PurePosixPath(relative)) != relative or relative.startswith("/")
+            or any(p in ("..", ".git") for p in parts)):
         raise ValueError(f"Unsafe path: {relative}")
     path = root.joinpath(*parts)
     if path.is_symlink() or any(p.is_symlink() for p in path.parents if p != root.parent):
@@ -204,14 +205,19 @@ def apply_bundle(root, board, card, bundle, before):
             raise ValueError("Duplicate or out-of-scope returned file")
         seen.add(item["path"])
         path = safe_path(root, item["path"])
+        if "\0" in item["content"] or (path.is_file() and "\0" in path.read_text(encoding="utf-8")):
+            raise ValueError("Binary file edits are unsupported")
         current = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
         after = hashlib.sha256(item["content"].encode()).hexdigest()
         if current not in (before.get(item["path"]), after):
             raise ValueError("User/external edit detected; refusing to overwrite")
+    evidence_names = set()
     for item in bundle["evidence"]:
         validate_fields(item, name=str, content=str, proves=str)
-        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", item["name"]) or not item["content"].strip():
+        if (not re.fullmatch(r"[a-zA-Z0-9_.-]+", item["name"]) or not item["content"].strip()
+                or item["name"] in evidence_names):
             raise ValueError("Evidence must be nonempty text with a safe filename")
+        evidence_names.add(item["name"])
     if not bundle["evidence"]:
         raise ValueError("Evidence required")
     # Validate the whole bundle before touching any product file.
@@ -266,6 +272,9 @@ async def main():
         raise ValueError("Target HEAD changed; reconcile with the user, do not checkout/reset")
     if not 1 <= CONFIG.get("max_rounds", 3) <= 6:
         raise ValueError("max_rounds must be 1..6")
+    if (mode == "plan" and board.is_dir() and any(p.name != ".lock" for p in board.iterdir())
+            and not (board / "contract.json").exists()):
+        raise ValueError("Refusing to initialize over an unrelated existing directory")
     identity = {k: CONFIG.get(k) for k in ("repo", "commit", "goal", "tier", "max_rounds", "decisions", "suite", "target")}
     role_rules = ("No commits, pushes, PRs, deploys, deletes, purchases, credential access or external messages. "
                   "No browser/UI tests: mark them untested; only the host can request approved UI testing. "
