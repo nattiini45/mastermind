@@ -13,8 +13,14 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from typing import Any, Awaitable, Callable
 
-CONFIG = {}
+agent: Callable[..., Awaitable[dict[str, Any]]]
+register_workflow: Callable[[dict[str, Any]], Awaitable[None]]
+log: Callable[[str], None]
+WorkflowAgentError: type[Exception]
+
+CONFIG: dict[str, Any] = {}
 MAX_BUNDLE_BYTES = 2_000_000
 COVERAGE_FIELDS = ("unit_id,requirement_id,artifact_path,snapshot_id,contract_version,environment_id,"
                    "check_kind,required,role,method_id,status,result,evidence_id,evidence_locator,"
@@ -149,7 +155,8 @@ def validate_plan(contract, plan, root, board_name):
     card_ids = {c.get("id") for c in cards}
     if len(card_ids) != len(cards) or any(not isinstance(i, str) or not re.fullmatch(r"C-\d{3,}", i) for i in card_ids):
         raise ValueError("Invalid/duplicate card id")
-    covered, earlier = set(), set()
+    covered: set[str] = set()
+    earlier: set[str] = set()
     for card in cards:
         validate_fields(card, id=str, title=str, goal=str, scope=list, bar=str, covers=list, blocked_by=list)
         if not card["scope"] or not card["bar"] or not card["covers"] or not set(card["covers"]) <= ids:

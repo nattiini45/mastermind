@@ -93,3 +93,7 @@ interruption; use `resume` in a later session to continue from board checkpoints
 
 Offline tests use synthetic seats and temporary git repositories. They do not
 execute a cloud engagement. Run `python -m unittest discover -s tests -v`.
+For development checks, install `requirements-dev.txt` in an isolated venv, then
+run `ruff check skills/mastermind/workflow.py tests/test_devin_workflow.py` and
+`mypy --check-untyped-defs skills/mastermind/workflow.py`. The runtime names are
+annotated without assigning or replacing Devin's injected functions.

@@ -20,3 +20,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s tests -v
+      - run: python -m pip install -r requirements-dev.txt
+      - run: ruff check skills/mastermind/workflow.py tests/test_devin_workflow.py
+      - run: mypy --check-untyped-defs skills/mastermind/workflow.py

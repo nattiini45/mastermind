@@ -1,7 +1,6 @@
 """Offline synthetic-seat tests. No cloud sessions or API calls."""
 import asyncio
 import importlib.util
-import json
 import subprocess
 import tempfile
 import unittest
