@@ -112,3 +112,15 @@ After `applied`, unchanged work can resume without rewriting product files.
 Rejected returns stay in their original round's audit artifacts; subsequent native
 resume uses a new round/agent label, subject to the original round cap. Out-of-scope
 suite side effects block the card immediately rather than being retried silently.
+
+Checkpoint schema v2 records typed file hashes, modes and links. Legacy boards
+first verify every old visible-file digest and path inventory against the live
+tree; changed content still blocks. They then stop with `INVENTORY-MIGRATION.json`
+and a separate approval digest. Show the newly observed paths and mode baselines
+to the user: old checkpoints cannot establish historical ignored-file contents or
+permissions. Only after explicit acceptance set
+`approved_inventory_migration_sha256` to that digest and resume. Any further tree
+change invalidates this approval. A pending legacy bundle and its upgraded before
+snapshot are archived in `legacy-pending-audit.json`; its attempt is consumed and
+a new round is dispatched instead of replaying ambiguous product writes. The
+original round cap still applies. Unknown newer schema versions are not downgraded.
