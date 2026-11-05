@@ -15,7 +15,7 @@ Use the native Python template beside this skill, not `mastermind.dwf.ts`.
    than manufacturing a large workflow. Do not silently launch agents just
    because this skill was found during another task.
 2. Create and verify a persistent engagement directory. Copy `workflow.py` there
-   and replace only `CONFIG = {}` with the literal described in `DEVIN.md`.
+   and fill only the `CONFIG` dictionary with the literal described in `DEVIN.md`.
    `source_dir` points at this plugin root; `repo_path` is the target checkout;
    `repo` is its cloud name; `commit` is its full immutable HEAD SHA. A fresh
    engagement requires a clean target tree; never commit/discard the user's work
