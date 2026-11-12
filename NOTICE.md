@@ -55,4 +55,4 @@ survives intact (three-round gate cap, the coverage denominator, honest reportin
 credit is Da7-Tech's. gauntlet-board is the same author as Mastermind, so its contribution
 is recorded here as lineage rather than third-party attribution.
 
-Mastermind itself: MIT © 2026 Caspar (PawCommit Studio) — see [LICENSE](LICENSE).
+Mastermind itself: MIT © 2026 PawCommit Studio — see [LICENSE](LICENSE).
